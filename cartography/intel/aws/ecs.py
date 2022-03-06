@@ -1,4 +1,7 @@
 import logging
+
+from pytz import timezone
+
 from typing import Any
 from typing import Dict
 from typing import List
@@ -6,6 +9,8 @@ from typing import Tuple
 
 import boto3
 import neo4j
+
+from cartography.intel.aws.ec2.util import get_botocore_config
 
 from cartography.util import aws_handle_regions
 from cartography.util import camel_to_snake
@@ -19,7 +24,7 @@ logger = logging.getLogger(__name__)
 @timeit
 @aws_handle_regions
 def get_ecs_clusters(boto3_session: boto3.session.Session, region: str) -> Tuple[List[str], List[Dict[str, Any]]]:
-    client = boto3_session.client('ecs', region_name=region)
+    client = boto3_session.client('ecs', region_name=region, config=get_botocore_config())
     paginator = client.get_paginator('list_clusters')
     clusters: List[Dict[str, Any]] = []
     cluster_arns: List[str] = []
@@ -42,7 +47,8 @@ def get_ecs_container_instances(
     boto3_session: boto3.session.Session,
     region: str,
 ) -> List[Dict[str, Any]]:
-    client = boto3_session.client('ecs', region_name=region)
+    logger.debug("Starting get_ecs_container_instances")
+    client = boto3_session.client('ecs', region_name=region, config=get_botocore_config())
     paginator = client.get_paginator('list_container_instances')
     container_instances: List[Dict[str, Any]] = []
     container_instance_arns: List[str] = []
@@ -57,13 +63,14 @@ def get_ecs_container_instances(
             include=includes,
         )
         container_instances.extend(container_instance_chunk.get('containerInstances', []))
+    logger.debug("Ending get_ecs_container_instances.  Returning container_instances: {container_instances}")
     return container_instances
 
 
 @timeit
 @aws_handle_regions
 def get_ecs_services(cluster_arn: str, boto3_session: boto3.session.Session, region: str) -> List[Dict[str, Any]]:
-    client = boto3_session.client('ecs', region_name=region)
+    client = boto3_session.client('ecs', region_name=region, config=get_botocore_config())
     paginator = client.get_paginator('list_services')
     services: List[Dict[str, Any]] = []
     service_arns: List[str] = []
@@ -82,7 +89,7 @@ def get_ecs_services(cluster_arn: str, boto3_session: boto3.session.Session, reg
 @timeit
 @aws_handle_regions
 def get_ecs_task_definitions(boto3_session: boto3.session.Session, region: str) -> List[Dict[str, Any]]:
-    client = boto3_session.client('ecs', region_name=region)
+    client = boto3_session.client('ecs', region_name=region, config=get_botocore_config())
     paginator = client.get_paginator('list_task_definitions')
     task_definitions: List[Dict[str, Any]] = []
     task_definition_arns: List[str] = []
@@ -99,7 +106,7 @@ def get_ecs_task_definitions(boto3_session: boto3.session.Session, region: str) 
 @timeit
 @aws_handle_regions
 def get_ecs_tasks(cluster_arn: str, boto3_session: boto3.session.Session, region: str) -> List[Dict[str, Any]]:
-    client = boto3_session.client('ecs', region_name=region)
+    client = boto3_session.client('ecs', region_name=region, config=get_botocore_config())
     paginator = client.get_paginator('list_tasks')
     tasks: List[Dict[str, Any]] = []
     task_arns: List[str] = []
@@ -123,11 +130,12 @@ def load_ecs_clusters(
     current_aws_account_id: str,
     aws_update_tag: int,
 ) -> None:
+    logger.debug("Starting load_ecs_clusters")
     ingest_clusters = """
-    UNWIND {Clusters} AS cluster
+    UNWIND $Clusters AS cluster
         MERGE (c:ECSCluster{id: cluster.clusterArn})
         ON CREATE SET c.firstseen = timestamp()
-        SET c.name = cluster.clusterName, c.region = {Region},
+        SET c.name = cluster.clusterName, c.region = $Region,
             c.arn = cluster.clusterArn,
             c.ecc_kms_key_id = cluster.configuration.executeCommandConfiguration.kmsKeyId,
             c.ecc_logging = cluster.configuration.executeCommandConfiguration.logging,
@@ -140,12 +148,12 @@ def load_ecs_clusters(
             c.settings_container_insights = cluster.settings_container_insights,
             c.capacity_providers = cluster.capacityProviders,
             c.attachments_status = cluster.attachmentsStatus,
-            c.lastupdated = {aws_update_tag}
+            c.lastupdated = $aws_update_tag
         WITH c
-        MATCH (owner:AWSAccount{id: {AWS_ACCOUNT_ID}})
+        MATCH (owner:AWSAccount{id: $AWS_ACCOUNT_ID})
         MERGE (owner)-[r:RESOURCE]->(c)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
     """  # noqa:E501
     clusters: List[Dict[str, Any]] = []
     for cluster in data:
@@ -161,6 +169,7 @@ def load_ecs_clusters(
         AWS_ACCOUNT_ID=current_aws_account_id,
         aws_update_tag=aws_update_tag,
     )
+    logger.debug("Finished load_ecs_clusters")
 
 
 @timeit
@@ -172,11 +181,13 @@ def load_ecs_container_instances(
     current_aws_account_id: str,
     aws_update_tag: int,
 ) -> None:
+    logger.debug("Starting load_ecs_container_instances")
     ingest_instances = """
-    UNWIND {Instances} AS instance
+    UNWIND $Instances AS instance
         MERGE (i:ECSContainerInstance{id: instance.containerInstanceArn})
         ON CREATE SET i.firstseen = timestamp()
-        SET i.ec2_instance_id = instance.ec2InstanceId, i.region = {Region},
+        SET i.ec2_instance_id = instance.ec2InstanceId,
+            i.region = $Region,
             i.arn = instance.containerInstanceArn,
             i.capacity_provider_name = instance.capacityProviderName,
             i.version = instance.version,
@@ -188,12 +199,17 @@ def load_ecs_container_instances(
             i.agent_connected = instance.agentConnected,
             i.agent_update_status = instance.agentUpdateStatus,
             i.registered_at = instance.registeredAt,
-            i.lastupdated = {aws_update_tag}
+            i.lastupdated = $aws_update_tag
         WITH i
-        MATCH (c:ECSCluster{id: {ClusterARN}})
+        MATCH (c:ECSCluster{id: $ClusterARN})
         MERGE (c)-[r:HAS_CONTAINER_INSTANCE]->(i)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
+        WITH i
+        MATCH (ec2:EC2Instance {instanceid: i.ec2_instance_id})
+        MERGE (i)-[r:INSTANCE_OF]->(ec2)
+        ON CREATE SET r.fisrtseen = timestamp()
+        SET r.lastupdated = $aws_update_tag
     """
     instances: List[Dict[str, Any]] = []
     for instance in data:
@@ -208,6 +224,7 @@ def load_ecs_container_instances(
         AWS_ACCOUNT_ID=current_aws_account_id,
         aws_update_tag=aws_update_tag,
     )
+    logger.debug("Ending load_ecs_container_instances")
 
 
 @timeit
@@ -220,10 +237,10 @@ def load_ecs_services(
     aws_update_tag: int,
 ) -> None:
     ingest_services = """
-    UNWIND {Services} AS service
+    UNWIND $Services AS service
         MERGE (s:ECSService{id: service.serviceArn})
         ON CREATE SET s.firstseen = timestamp()
-        SET s.name = service.serviceName, s.region = {Region},
+        SET s.name = service.serviceName, s.region = $Region,
             s.arn = service.serviceArn,
             s.cluster_arn = service.clusterArn,
             s.status = service.status,
@@ -245,17 +262,17 @@ def load_ecs_services(
             s.enable_ecs_managed_tags = service.enableECSManagedTags,
             s.propagate_tags = service.propagateTags,
             s.enable_execute_command = service.enableExecuteCommand,
-            s.lastupdated = {aws_update_tag}
+            s.lastupdated = $aws_update_tag
         WITH s
-        MATCH (c:ECSCluster{id: {ClusterARN}})
+        MATCH (c:ECSCluster{id: $ClusterARN})
         MERGE (c)-[r:HAS_SERVICE]->(s)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
         WITH s
         MATCH (d:ECSTaskDefinition{id: s.task_definition})
         MERGE (s)-[r2:HAS_TASK_DEFINITION]->(d)
         ON CREATE SET r2.firstseen = timestamp()
-        SET r2.lastupdated = {aws_update_tag}
+        SET r2.lastupdated = $aws_update_tag
     """  # noqa:E501
     services: List[Dict[str, Any]] = []
     for service in data:
@@ -281,10 +298,10 @@ def load_ecs_task_definitions(
     aws_update_tag: int,
 ) -> None:
     ingest_task_definitions = """
-    UNWIND {Definitions} AS def
+    UNWIND $Definitions AS def
         MERGE (d:ECSTaskDefinition{id: def.taskDefinitionArn})
         ON CREATE SET d.firstseen = timestamp()
-        SET d.arn = def.taskDefinitionArn, d.region = {Region},
+        SET d.arn = def.taskDefinitionArn, d.region = $Region,
             d.family = def.family,
             d.task_role_arn = def.taskRoleArn,
             d.execution_role_arn = def.executionRoleArn,
@@ -305,12 +322,12 @@ def load_ecs_task_definitions(
             d.deregistered_at = def.deregisteredAt,
             d.registered_by = def.registeredBy,
             d.ephemeral_storage_size_in_gib = def.ephemeralStorage.sizeInGiB,
-            d.lastupdated = {aws_update_tag}
+            d.lastupdated = $aws_update_tag
         WITH d
-        MATCH (owner:AWSAccount{id: {AWS_ACCOUNT_ID}})
+        MATCH (owner:AWSAccount{id: $AWS_ACCOUNT_ID})
         MERGE (owner)-[r:RESOURCE]->(d)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
     """
     container_definitions: List[Dict[str, Any]] = []
     task_definitions: List[Dict[str, Any]] = []
@@ -349,10 +366,10 @@ def load_ecs_tasks(
     aws_update_tag: int,
 ) -> None:
     ingest_tasks = """
-    UNWIND {Tasks} AS task
+    UNWIND $Tasks AS task
         MERGE (t:ECSTask{id: task.taskArn})
         ON CREATE SET t.firstseen = timestamp()
-        SET t.arn = task.taskArn, t.region = {Region},
+        SET t.arn = task.taskArn, t.region = $Region,
             t.availability_zone = task.availabilityZone,
             t.capacity_provider_name = task.capacityProviderName,
             t.cluster_arn = task.clusterArn,
@@ -382,22 +399,22 @@ def load_ecs_tasks(
             t.task_definition_arn = task.taskDefinitionArn,
             t.version = task.version,
             t.ephemeral_storage_size_in_gib = task.ephemeralStorage.sizeInGiB,
-            t.lastupdated = {aws_update_tag}
+            t.lastupdated = $aws_update_tag
         WITH t
-        MATCH (c:ECSCluster{id: {ClusterARN}})
+        MATCH (c:ECSCluster{id: $ClusterARN})
         MERGE (c)-[r:HAS_TASK]->(t)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
         WITH t
         MATCH (td:ECSTaskDefinition{id: t.task_definition_arn})
         MERGE (t)-[r2:HAS_TASK_DEFINITION]->(td)
         ON CREATE SET r2.firstseen = timestamp()
-        SET r2.lastupdated = {aws_update_tag}
+        SET r2.lastupdated = $aws_update_tag
         WITH t
         MATCH (ci:ECSContainerInstance{id: t.container_instance_arn})
         MERGE (ci)-[r3:HAS_TASK]->(t)
         ON CREATE SET r3.firstseen = timestamp()
-        SET r3.lastupdated = {aws_update_tag}
+        SET r3.lastupdated = $aws_update_tag
     """
     containers: List[Dict[str, Any]] = []
     tasks: List[Dict[str, Any]] = []
@@ -440,10 +457,10 @@ def load_ecs_container_definitions(
     aws_update_tag: int,
 ) -> None:
     ingest_definitions = """
-    UNWIND {Definitions} AS def
+    UNWIND $Definitions AS def
         MERGE (d:ECSContainerDefinition{id: def._taskDefinitionArn + "-" + def.name})
         ON CREATE SET d.firstseen = timestamp()
-        SET d.task_definition_arn = def._taskDefinitionArn, d.region = {Region},
+        SET d.task_definition_arn = def._taskDefinitionArn, d.region = $Region,
             d.name = def.name,
             d.image = def.image,
             d.cpu = def.cpu,
@@ -466,12 +483,12 @@ def load_ecs_container_definitions(
             d.docker_security_options = def.dockerSecurityOptions,
             d.interactive = def.interactive,
             d.pseudo_terminal = def.pseudoTerminal,
-            d.lastupdated = {aws_update_tag}
+            d.lastupdated = $aws_update_tag
         WITH d
         MATCH (td:ECSTaskDefinition{id: d.task_definition_arn})
         MERGE (td)-[r:HAS_CONTAINER_DEFINITION]->(d)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
     """
     neo4j_session.run(
         ingest_definitions,
@@ -491,10 +508,10 @@ def load_ecs_containers(
     aws_update_tag: int,
 ) -> None:
     ingest_containers = """
-    UNWIND {Containers} AS container
+    UNWIND $Containers AS container
         MERGE (c:ECSContainer{id: container.containerArn})
         ON CREATE SET c.firstseen = timestamp()
-        SET c.arn = container.containerArn, c.region = {Region},
+        SET c.arn = container.containerArn, c.region = $Region,
             c.task_arn = container.taskArn,
             c.name = container.name,
             c.image = container.image,
@@ -508,12 +525,12 @@ def load_ecs_containers(
             c.memory = container.memory,
             c.memory_reservation = container.memoryReservation,
             c.gpu_ids = container.gpuIds,
-            c.lastupdated = {aws_update_tag}
+            c.lastupdated = $aws_update_tag
         WITH c
         MATCH (t:ECSTask{id: c.task_arn})
         MERGE (t)-[r:HAS_CONTAINER]->(c)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {aws_update_tag}
+        SET r.lastupdated = $aws_update_tag
     """
     neo4j_session.run(
         ingest_containers,
@@ -537,10 +554,13 @@ def sync(
     for region in regions:
         logger.info("Syncing ECS for region '%s' in account '%s'.", region, current_aws_account_id)
         cluster_arns, clusters = get_ecs_clusters(boto3_session, region)
+        logger.debug(f"cluster_arns: {cluster_arns}\n\nclusters: {clusters}")
         if len(clusters) == 0:
             continue
+        logger.debug("Loading ECS Clusters...")
         load_ecs_clusters(neo4j_session, clusters, region, current_aws_account_id, update_tag)
         for cluster_arn in cluster_arns:
+            logger.debug("Working through cluster: {cluster_arn}")
             cluster_instances = get_ecs_container_instances(
                 cluster_arn,
                 boto3_session,
@@ -554,41 +574,41 @@ def sync(
                 current_aws_account_id,
                 update_tag,
             )
-            task_definitions = get_ecs_task_definitions(
-                boto3_session,
-                region,
-            )
-            load_ecs_task_definitions(
-                neo4j_session,
-                task_definitions,
-                region,
-                current_aws_account_id,
-                update_tag,
-            )
-            services = get_ecs_services(
-                cluster_arn,
-                boto3_session,
-                region,
-            )
-            load_ecs_services(
-                neo4j_session,
-                cluster_arn,
-                services,
-                region,
-                current_aws_account_id,
-                update_tag,
-            )
-            tasks = get_ecs_tasks(
-                cluster_arn,
-                boto3_session,
-                region,
-            )
-            load_ecs_tasks(
-                neo4j_session,
-                cluster_arn,
-                tasks,
-                region,
-                current_aws_account_id,
-                update_tag,
-            )
+###            task_definitions = get_ecs_task_definitions(
+###                boto3_session,
+###                region,
+###            )
+###            load_ecs_task_definitions(
+###                neo4j_session,
+###                task_definitions,
+###                region,
+###                current_aws_account_id,
+###                update_tag,
+###            )
+###            services = get_ecs_services(
+###                cluster_arn,
+###                boto3_session,
+###                region,
+###            )
+###            load_ecs_services(
+###                neo4j_session,
+###                cluster_arn,
+###                services,
+###                region,
+###                current_aws_account_id,
+###                update_tag,
+###            )
+###            tasks = get_ecs_tasks(
+###                cluster_arn,
+###                boto3_session,
+###                region,
+###            )
+###            load_ecs_tasks(
+###                neo4j_session,
+###                cluster_arn,
+###                tasks,
+###                region,
+###                current_aws_account_id,
+###                update_tag,
+###            )
     cleanup_ecs(neo4j_session, common_job_parameters)

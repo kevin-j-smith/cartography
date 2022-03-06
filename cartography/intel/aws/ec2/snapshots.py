@@ -6,8 +6,10 @@ import boto3
 import neo4j
 
 from cartography.util import aws_handle_regions
+from cartography.util import dict_date_to_epoch
 from cartography.util import run_cleanup_job
 from cartography.util import timeit
+from cartography.intel.aws.util.common import extract_name_from_tags
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,7 @@ def get_snapshots(boto3_session: boto3.session.Session, region: str) -> List[Dic
     client = boto3_session.client('ec2', region_name=region)
     paginator = client.get_paginator('describe_snapshots')
     snapshots: List[Dict] = []
-    for page in paginator.paginate():
+    for page in paginator.paginate(OwnerIds = ['880111024226']):
         snapshots.extend(page['Snapshots'])
     return snapshots
 
@@ -28,23 +30,36 @@ def load_snapshots(
         neo4j_session: neo4j.Session, data: List[Dict], region: str, current_aws_account_id: str, update_tag: int,
 ) -> None:
     ingest_snapshots = """
-    UNWIND {snapshots_list} as snapshot
+    UNWIND $snapshots_list as snapshot
         MERGE (s:EBSSnapshot{id: snapshot.SnapshotId})
         ON CREATE SET s.firstseen = timestamp()
-        SET s.lastupdated = {update_tag}, s.description = snapshot.Description, s.encrypted = snapshot.Encrypted,
-        s.progress = snapshot.Progress, s.starttime = snapshot.StartTime, s.state = snapshot.State,
-        s.statemessage = snapshot.StateMessage, s.volumeid = snapshot.VolumeId, s.volumesize = snapshot.VolumeSize,
-        s.outpostarn = snapshot.OutpostArn, s.dataencryptionkeyid = snapshot.DataEncryptionKeyId,
-        s.kmskeyid = snapshot.KmsKeyId, s.region={Region}
+        SET 
+          s.lastupdated = $update_tag,
+          s.name = snapshot.Name,
+          s.description = snapshot.Description,
+          s.encrypted = snapshot.Encrypted,
+          s.progress = snapshot.Progress,
+          s.starttime = snapshot.StartTime,
+          s.state = snapshot.State,
+          s.statemessage = snapshot.StateMessage,
+          s.volumeid = snapshot.VolumeId,
+          s.volumesize = snapshot.VolumeSize,
+          s.outpostarn = snapshot.OutpostArn,
+          s.dataencryptionkeyid = snapshot.DataEncryptionKeyId,
+          s.kmskeyid = snapshot.KmsKeyId,
+          s.region=$Region
         WITH s
-        MATCH (aa:AWSAccount{id: {AWS_ACCOUNT_ID}})
+        MATCH (aa:AWSAccount{id: $AWS_ACCOUNT_ID})
         MERGE (aa)-[r:RESOURCE]->(s)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {update_tag}
+        SET r.lastupdated = $update_tag
     """
 
     for snapshot in data:
-        snapshot['StartTime'] = str(snapshot['StartTime'])
+        logger.info(f"snapshot.StartTime: {snapshot['StartTime']}")
+        snapshot['StartTime'] = dict_date_to_epoch(snapshot, 'StartTime')
+        logger.info(f"snapshot.StartTime.datetime: {snapshot['StartTime']}")
+        snapshot['Name'] = extract_name_from_tags(snapshot)
 
     neo4j_session.run(
         ingest_snapshots,
@@ -70,20 +85,20 @@ def load_snapshot_volume_relations(
         neo4j_session: neo4j.Session, data: List[Dict], current_aws_account_id: str, update_tag: int,
 ) -> None:
     ingest_volumes = """
-    UNWIND {snapshot_volumes_list} as volume
+    UNWIND $snapshot_volumes_list as volume
         MERGE (v:EBSVolume{id: volume.VolumeId})
         ON CREATE SET v.firstseen = timestamp()
-        SET v.lastupdated = {update_tag}
+        SET v.lastupdated = $update_tag
         WITH v, volume
-        MATCH (aa:AWSAccount{id: {AWS_ACCOUNT_ID}})
+        MATCH (aa:AWSAccount{id: $AWS_ACCOUNT_ID})
         MERGE (aa)-[r:RESOURCE]->(v)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {update_tag}
+        SET r.lastupdated = $update_tag
         WITH v, volume
         MATCH (s:EBSSnapshot{id: volume.SnapshotId})
         MERGE (s)-[r:CREATED_FROM]->(v)
         ON CREATE SET r.firstseen = timestamp()
-        SET r.lastupdated = {update_tag}
+        SET r.lastupdated = $update_tag
     """
 
     neo4j_session.run(

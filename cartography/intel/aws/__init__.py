@@ -98,7 +98,10 @@ def _autodiscover_account_regions(boto3_session: boto3.session.Session, account_
             account_id,
         )
         raise
-    return regions
+    filtered = list(filter(lambda region: region.startswith('us-'), regions))
+    #return regions
+    logger.info(f"running with filtered regions: {filtered}")
+    return filtered
 
 
 def _autodiscover_accounts(

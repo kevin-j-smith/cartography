@@ -1,7 +1,9 @@
 import logging
 import re
 import sys
+
 from functools import wraps
+from pytz import timezone
 from string import Template
 from typing import Dict
 from typing import Optional
@@ -75,8 +77,8 @@ def merge_module_sync_metadata(
             n:SyncMetadata, n.firstseen=timestamp()
         SET n.syncedtype='${synced_type}',
             n.grouptype='${group_type}',
-            n.groupid={group_id},
-            n.lastupdated={UPDATE_TAG}
+            n.groupid=$group_id,
+            n.lastupdated=$UPDATE_TAG
     """)
     neo4j_session.run(
         template.safe_substitute(group_type=group_type, group_id=group_id, synced_type=synced_type),
@@ -151,14 +153,14 @@ def dict_value_to_str(obj: Dict, key: str) -> Optional[str]:
         return None
 
 
-def dict_date_to_epoch(obj: Dict, key: str) -> Optional[int]:
+def dict_date_to_epoch(obj: Dict, key: str) -> Optional[object]:
     """
     Convert the date referenced by the key in the dict to an epoch timestamp, if it exists, and return it. If it
     doesn't exist, return None.
     """
     value = obj.get(key)
     if value is not None:
-        return int(value.timestamp())
+        return value.astimezone(timezone("US/Central"))
     else:
         return None
 

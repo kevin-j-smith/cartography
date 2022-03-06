@@ -9,6 +9,7 @@ from .util import get_botocore_config
 from cartography.util import aws_handle_regions
 from cartography.util import run_cleanup_job
 from cartography.util import timeit
+from cartography.intel.aws.util.common import extract_name_from_tags
 
 logger = logging.getLogger(__name__)
 
@@ -31,37 +32,50 @@ def load_subnets(
 ) -> None:
 
     ingest_subnets = """
-    UNWIND {subnets} as subnet
+    UNWIND $subnets as subnet
     MERGE (snet:EC2Subnet{subnetid: subnet.SubnetId})
-    ON CREATE SET snet.firstseen = timestamp()
-    SET snet.lastupdated = {aws_update_tag}, snet.name = subnet.CidrBlock, snet.cidr_block = subnet.CidrBlock,
-    snet.available_ip_address_count = subnet.AvailableIpAddressCount, snet.default_for_az = subnet.DefaultForAz,
-    snet.map_customer_owned_ip_on_launch = subnet.MapCustomerOwnedIpOnLaunch,
-    snet.state = subnet.State, snet.assignipv6addressoncreation = subnet.AssignIpv6AddressOnCreation,
-    snet.map_public_ip_on_launch = subnet.MapPublicIpOnLaunch, snet.subnet_arn = subnet.SubnetArn,
-    snet.availability_zone = subnet.AvailabilityZone, snet.availability_zone_id = subnet.AvailabilityZoneId,
-    snet.subnetid = subnet.SubnetId
+      ON CREATE SET snet.firstseen = timestamp()
+    SET 
+      snet.lastupdated = $aws_update_tag,
+      snet.name = subnet.Name,
+      snet.cidr_block = subnet.CidrBlock,
+      snet.available_ip_address_count = subnet.AvailableIpAddressCount,
+      snet.default_for_az = subnet.DefaultForAz,
+      snet.map_customer_owned_ip_on_launch = subnet.MapCustomerOwnedIpOnLaunch,
+      snet.state = subnet.State,
+      snet.assignipv6addressoncreation = subnet.AssignIpv6AddressOnCreation,
+      snet.map_public_ip_on_launch = subnet.MapPublicIpOnLaunch,
+      snet.subnet_arn = subnet.SubnetArn,
+      snet.availability_zone = subnet.AvailabilityZone,
+      snet.availability_zone_id = subnet.AvailabilityZoneId,
+      snet.subnetid = subnet.SubnetId
     """
 
     ingest_subnet_vpc_relations = """
-    UNWIND {subnets} as subnet
+    UNWIND $subnets as subnet
     MATCH (snet:EC2Subnet{subnetid: subnet.SubnetId}), (vpc:AWSVpc{id: subnet.VpcId})
     MERGE (snet)-[r:MEMBER_OF_AWS_VPC]->(vpc)
     ON CREATE SET r.firstseen = timestamp()
-    SET r.lastupdated = {aws_update_tag}
+    SET r.lastupdated = $aws_update_tag
     """
 
     ingest_subnet_aws_account_relations = """
-    UNWIND {subnets} as subnet
-    MATCH (snet:EC2Subnet{subnetid: subnet.SubnetId}), (aws:AWSAccount{id: {aws_account_id}})
+    UNWIND $subnets as subnet
+    MATCH (snet:EC2Subnet{subnetid: subnet.SubnetId}), (aws:AWSAccount{id: $aws_account_id})
     MERGE (aws)-[r:RESOURCE]->(snet)
     ON CREATE SET r.firstseen = timestamp()
-    SET r.lastupdated = {aws_update_tag}
+    SET r.lastupdated = $aws_update_tag
     """
 
+    for s in data:
+      s['Name'] = extract_name_from_tags(s)
+
     neo4j_session.run(
-        ingest_subnets, subnets=data, aws_update_tag=aws_update_tag,
-        region=region, aws_account_id=aws_account_id,
+        ingest_subnets,
+        subnets=data,
+        aws_update_tag=aws_update_tag,
+        region=region,
+        aws_account_id=aws_account_id,
     )
     neo4j_session.run(
         ingest_subnet_vpc_relations, subnets=data, aws_update_tag=aws_update_tag,

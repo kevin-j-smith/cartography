@@ -112,6 +112,7 @@ def run_with_config(sync, config):
             config.neo4j_uri,
             auth=neo4j_auth,
             max_connection_lifetime=config.neo4j_max_connection_lifetime,
+            encrypted=False,
         )
     except neobolt.exceptions.ServiceUnavailable as e:
         logger.debug("Error occurred during Neo4j connect.", exc_info=True)
@@ -162,14 +163,14 @@ def build_default_sync():
     sync.add_stages([
         ('create-indexes', cartography.intel.create_indexes.run),
         ('aws', cartography.intel.aws.start_aws_ingestion),
-        ('azure', cartography.intel.azure.start_azure_ingestion),
-        ('gcp', cartography.intel.gcp.start_gcp_ingestion),
-        ('gsuite', cartography.intel.gsuite.start_gsuite_ingestion),
-        ('crxcavator', cartography.intel.crxcavator.start_extension_ingestion),
-        ('okta', cartography.intel.okta.start_okta_ingestion),
-        ('github', cartography.intel.github.start_github_ingestion),
-        ('digitalocean', cartography.intel.digitalocean.start_digitalocean_ingestion),
-        ('kubernetes', cartography.intel.kubernetes.start_k8s_ingestion),
+        #('azure', cartography.intel.azure.start_azure_ingestion),
+        #('gcp', cartography.intel.gcp.start_gcp_ingestion),
+        #('gsuite', cartography.intel.gsuite.start_gsuite_ingestion),
+        #('crxcavator', cartography.intel.crxcavator.start_extension_ingestion),
+        #('okta', cartography.intel.okta.start_okta_ingestion),
+        #('github', cartography.intel.github.start_github_ingestion),
+        #('digitalocean', cartography.intel.digitalocean.start_digitalocean_ingestion),
+        #('kubernetes', cartography.intel.kubernetes.start_k8s_ingestion),
         ('analysis', cartography.intel.analysis.run),
     ])
     return sync
